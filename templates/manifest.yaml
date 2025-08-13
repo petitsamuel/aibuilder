@@ -1,0 +1,52 @@
+# templates/manifest.yaml
+# This file is the single source of truth for all available application templates.
+# The Tech Stack Selector agent reads this to make its decision.
+# The Environment Manager agent reads this to know which directory to copy.
+
+templates:
+  - id: "react-express-sqlite" # (Required) A unique, machine-friendly identifier. No spaces.
+    name: "React + Express + SQLite" # (Required) A human-friendly name for display in UIs.
+    path: "./react-express-sqlite" # (Required) The root subdirectory path to copy files from.
+    description:
+      | # (Required) A detailed description for the LLM to understand its purpose.
+      A classic full-stack application. Great for traditional web apps that need a
+      backend API and a database. Uses a simple file-based SQLite database for persistence,
+      making it easy to set up. Ideal for internal tools or MVPs.
+    tags: # (Required) Keywords to help the LLM match user requests.
+      - "react"
+      - "express"
+      - "nodejs"
+      - "full-stack"
+      - "api"
+      - "database"
+      - "sqlite"
+    system_instructions: # (Optional) Per-agent instructions to override defaults for this stack.
+      coder_agent_si: |
+        You are an expert in the MERN stack. When writing code, adhere to React best practices for the frontend
+        and create modular, single-responsibility services in the Express backend. Use async/await for all
+        database operations with the 'sqlite3' package.
+      qa_agent_si: |
+        You are a QA agent testing a React/Express application. API endpoints are prefixed with /api.
+        Focus on testing the backend API endpoints by making HTTP requests.
+
+  - id: "nextjs-tailwind-static"
+    name: "Next.js + Tailwind CSS (Static Site)"
+    path: "./nextjs-tailwind-static"
+    description: |
+      A modern, high-performance static website. Ideal for landing pages, blogs, or portfolios
+      where a backend database is not required. Generates static HTML, making it incredibly fast
+      and great for SEO.
+    tags:
+      - "nextjs"
+      - "react"
+      - "tailwind"
+      - "frontend-only"
+      - "static"
+      - "seo"
+      - "blog"
+      - "portfolio"
+    system_instructions:
+      coder_agent_si: |
+        You are an expert in Next.js and Tailwind CSS. Your focus is on building React components
+        in the /components directory and pages in the /pages directory. Use Tailwind utility classes
+        for all styling. Do not attempt to write backend server code.
