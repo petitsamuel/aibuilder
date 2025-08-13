@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-import asyncio
 import os
+import sys
 from typing import Any, Dict, List
 
-import httpx
-from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse, Response
+from starlette.responses import JSONResponse, Response, PlainTextResponse
 from starlette.routing import Route
+
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+from agentkit import AgentApp
 
 
 # ------------------------------
@@ -77,10 +79,6 @@ def select_template(prompt: str, templates: List[str]) -> str:
 # ------------------------------
 
 
-async def health(_: Request) -> Response:
-    return PlainTextResponse("ok")
-
-
 async def execute_task(request: Request) -> Response:
     try:
         body = await request.json()
@@ -101,33 +99,19 @@ async def execute_task(request: Request) -> Response:
 
 
 routes = [
-    Route("/health", health, methods=["GET"]),
     Route("/execute_task", execute_task, methods=["POST"]),
 ]
 
-app = Starlette(debug=False, routes=routes)
-
-
-# ------------------------------
-# Heartbeat / Registration
-# ------------------------------
-
-
-_heartbeat_task: asyncio.Task | None = None
-
-
-async def _heartbeat_loop() -> None:
-    payload: Dict[str, Any] = {
+def _make_registration_payload(agent_address: str) -> Dict[str, Any]:
+    return {
         "agent_name": AGENT_NAME,
-        "agent_address": _agent_address(),
+        "agent_address": agent_address,
         "capabilities": {
             "role": "tech_stack_selector",
             "endpoints": ["/execute_task"],
             "version": "0.1.0",
-            # Self-described MCP tool(s) this agent offers
             "mcp_tools": [
                 {
-                    # MCP Tool schema (mcp.types.Tool)
                     "name": "select_tech_stack",
                     "description": "Analyze a prompt and return the best template name.",
                     "inputSchema": {
@@ -143,8 +127,6 @@ async def _heartbeat_loop() -> None:
                         "required": ["prompt"],
                         "additionalProperties": False,
                     },
-                    # output is plain text string, so omit outputSchema
-                    # Transport hint for registry proxy
                     "_meta": {
                         "http": {
                             "endpoint": "/execute_task",
@@ -157,32 +139,17 @@ async def _heartbeat_loop() -> None:
         },
     }
 
-    # Register immediately, then heartbeat periodically
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        while True:
-            try:
-                await client.post(f"{REGISTRY_URL}/register", json=payload)
-            except Exception:
-                # Silent retry; registry might be down during startup
-                pass
-            await asyncio.sleep(HEARTBEAT_INTERVAL)
+_agent = AgentApp(
+    agent_name=AGENT_NAME,
+    host=AGENT_HOST,
+    port=AGENT_PORT,
+    registry_url=REGISTRY_URL,
+    heartbeat_interval=HEARTBEAT_INTERVAL,
+    extra_routes=routes,
+    make_registration_payload=_make_registration_payload,
+)
 
-
-@app.on_event("startup")
-async def _on_startup() -> None:
-    global _heartbeat_task
-    _heartbeat_task = asyncio.create_task(_heartbeat_loop())
-
-
-@app.on_event("shutdown")
-async def _on_shutdown() -> None:
-    global _heartbeat_task
-    if _heartbeat_task is not None:
-        _heartbeat_task.cancel()
-        try:
-            await _heartbeat_task
-        except asyncio.CancelledError:
-            pass
+app = _agent.app
 
 
 if __name__ == "__main__":

@@ -79,7 +79,7 @@ def main() -> int:
     registry_env.setdefault("AGENT_REGISTRY_PORT", str(REGISTRY_PORT))
     registry_proc = subprocess.Popen(
         registry_cmd,
-        cwd=str(REPO_ROOT / "agent-registry"),
+        cwd=str(REPO_ROOT),
         env=registry_env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -91,10 +91,11 @@ def main() -> int:
         wait_for_http_ok(f"{registry_url}/status", timeout_seconds=30, require_json_key="agents")
 
         # Start Agent (Tech Stack Selector)
+        # Run the architect via module mode so `agentkit` is importable
         agent_cmd = [
             sys.executable,
-            "-u",
-            str(REPO_ROOT / "architect" / "architect.py"),
+            "-m",
+            "architect.architect",
         ]
         agent_env = os.environ.copy()
         agent_env.setdefault("REGISTRY_URL", registry_url)
@@ -102,7 +103,7 @@ def main() -> int:
         agent_env.setdefault("AGENT_PORT", str(AGENT_PORT))
         agent_proc = subprocess.Popen(
             agent_cmd,
-            cwd=str(REPO_ROOT / "architect"),
+            cwd=str(REPO_ROOT),  # ensure module mode picks up repo root
             env=agent_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -134,10 +135,11 @@ def main() -> int:
             db_path = str(Path(tmp_dir) / "orchestrator_state.sqlite")
 
             # Run one-turn Orchestrator
+            # Run orchestrator as module as well
             orch_cmd = [
                 sys.executable,
-                "-u",
-                str(REPO_ROOT / "orchestrator" / "orchestrator.py"),
+                "-m",
+                "orchestrator.orchestrator",
                 "--goal",
                 goal,
                 "--registry-url",
@@ -149,7 +151,7 @@ def main() -> int:
             ]
             result = subprocess.run(
                 orch_cmd,
-                cwd=str(REPO_ROOT / "orchestrator"),
+                cwd=str(REPO_ROOT),
                 text=True,
                 capture_output=True,
             )
