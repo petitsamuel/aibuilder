@@ -3,6 +3,8 @@
 # The Tech Stack Selector agent reads this to make its decision.
 # The Environment Manager agent reads this to know which directory to copy.
 
+# TODO : define list of init commands for each template
+
 templates:
   - id: "react-express-sqlite" # (Required) A unique, machine-friendly identifier. No spaces.
     name: "React + Express + SQLite" # (Required) A human-friendly name for display in UIs.
