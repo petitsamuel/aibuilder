@@ -5,11 +5,13 @@ import os
 from typing import Any, Dict, List, Optional
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 from pathlib import Path
 import shutil
 import yaml
+import httpx
+import json
 import contextlib
 from agentkit.base import AgentApp
 
@@ -37,6 +39,7 @@ MANIFEST_PATH = os.getenv(
     os.path.join(TEMPLATES_DIR, "manifest.yaml"),
 )
 
+
 def _agent_address() -> str:
     return f"http://{AGENT_HOST}:{AGENT_PORT}"
 
@@ -62,7 +65,9 @@ def _load_manifest() -> dict:
     return data
 
 
-def _lookup_template_path(template_id: Optional[str], template_path: Optional[str]) -> Path:
+def _lookup_template_path(
+    template_id: Optional[str], template_path: Optional[str]
+) -> Path:
     if template_path:
         # If relative path, resolve against templates dir
         try:
@@ -104,11 +109,15 @@ async def scaffold_project(request: Request) -> Response:
     project_name = body.get("project_name")
     overwrite = bool(body.get("overwrite", False))
 
-    if not isinstance(template_id, (str, type(None))) or not isinstance(template_path, (str, type(None))):
+    if not isinstance(template_id, (str, type(None))) or not isinstance(
+        template_path, (str, type(None))
+    ):
         return JSONResponse({"error": "invalid_template_fields"}, status_code=422)
 
     if destination_path and not isinstance(destination_path, str):
-        return JSONResponse({"error": "destination_path_must_be_string"}, status_code=422)
+        return JSONResponse(
+            {"error": "destination_path_must_be_string"}, status_code=422
+        )
     if project_name and not isinstance(project_name, str):
         return JSONResponse({"error": "project_name_must_be_string"}, status_code=422)
 
@@ -132,17 +141,25 @@ async def scaffold_project(request: Request) -> Response:
             return JSONResponse({"error": str(e)}, status_code=422)
 
     if not src_dir.exists() or not src_dir.is_dir():
-        return JSONResponse({"error": "template_dir_not_found", "template_dir": str(src_dir)}, status_code=404)
+        return JSONResponse(
+            {"error": "template_dir_not_found", "template_dir": str(src_dir)},
+            status_code=404,
+        )
 
     if dest_dir.exists() and any(dest_dir.iterdir()) and not overwrite:
-        return JSONResponse({"error": "destination_exists", "destination": str(dest_dir)}, status_code=409)
+        return JSONResponse(
+            {"error": "destination_exists", "destination": str(dest_dir)},
+            status_code=409,
+        )
 
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
         ignore = shutil.ignore_patterns("node_modules", ".git", "__pycache__")
         shutil.copytree(src_dir, dest_dir, dirs_exist_ok=True, ignore=ignore)
     except Exception as e:
-        return JSONResponse({"error": "copy_failed", "details": str(e)}, status_code=500)
+        return JSONResponse(
+            {"error": "copy_failed", "details": str(e)}, status_code=500
+        )
 
     return JSONResponse(
         {
@@ -174,7 +191,9 @@ async def _run_process(args: List[str], cwd: Optional[str], timeout: int) -> dic
         env=env,
     )
     try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout
+        )
     except asyncio.TimeoutError:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
@@ -219,7 +238,9 @@ async def install_dependencies(request: Request) -> Response:
         return JSONResponse({"error": "args_must_be_list_of_strings"}, status_code=422)
 
     if manager and manager not in _ALLOWED_PACKAGE_MANAGERS:
-        return JSONResponse({"error": "manager_not_allowed", "manager": manager}, status_code=422)
+        return JSONResponse(
+            {"error": "manager_not_allowed", "manager": manager}, status_code=422
+        )
 
     # Construct default command if only manager provided
     cmd: List[str]
@@ -243,7 +264,9 @@ async def install_dependencies(request: Request) -> Response:
 
     # Validate the executable
     if cmd[0] not in _ALLOWED_PACKAGE_MANAGERS:
-        return JSONResponse({"error": "executable_not_allowed", "executable": cmd[0]}, status_code=422)
+        return JSONResponse(
+            {"error": "executable_not_allowed", "executable": cmd[0]}, status_code=422
+        )
 
     try:
         result = await _run_process(cmd, cwd=cwd, timeout=timeout)
@@ -278,11 +301,400 @@ async def git_command(request: Request) -> Response:
     return JSONResponse({"status": "ok", "command": cmd, **result})
 
 
+# ------------------------------
+# System Operator (docker compose)
+# ------------------------------
+
+_DEFAULT_COMPOSE_FILENAMES = (
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "compose.yml",
+    "compose.yaml",
+)
+
+
+def _resolve_compose_file(cwd: str, compose_file: Optional[str]) -> Optional[Path]:
+    base_dir = _resolve_path(cwd, base=WORKSPACE_ROOT)
+    if compose_file:
+        return _resolve_path(compose_file, base=str(base_dir))
+    for name in _DEFAULT_COMPOSE_FILENAMES:
+        candidate = base_dir / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _compose_cmd(compose_file: Optional[Path]) -> List[str]:
+    cmd = ["docker", "compose"]
+    if compose_file is not None:
+        cmd.extend(["-f", str(compose_file)])
+    return cmd
+
+
+async def system_start(request: Request) -> Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    cwd = body.get("cwd")
+    compose_file = body.get("compose_file")
+    service = body.get("service")
+    build = bool(body.get("build", False))
+    extra_args = body.get("extra_args")
+    timeout = int(body.get("timeout", 600))
+
+    if not isinstance(cwd, str):
+        return JSONResponse({"error": "cwd_required"}, status_code=422)
+    if compose_file and not isinstance(compose_file, str):
+        return JSONResponse({"error": "compose_file_must_be_string"}, status_code=422)
+    if service and not isinstance(service, str):
+        return JSONResponse({"error": "service_must_be_string"}, status_code=422)
+    if extra_args and not (
+        isinstance(extra_args, list) and all(isinstance(x, str) for x in extra_args)
+    ):
+        return JSONResponse(
+            {"error": "extra_args_must_be_list_of_strings"}, status_code=422
+        )
+
+    try:
+        compose_path = _resolve_compose_file(cwd, compose_file)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+
+    cmd = _compose_cmd(compose_path)
+    cmd.extend(["up", "-d"])  # detached, non-blocking
+    if build:
+        cmd.append("--build")
+    if service:
+        cmd.append(service)
+    if extra_args:
+        cmd.extend(extra_args)
+
+    try:
+        result = await _run_process(cmd, cwd=cwd, timeout=timeout)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    return JSONResponse({"status": "ok", "command": cmd, **result})
+
+
+async def system_stop(request: Request) -> Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    cwd = body.get("cwd")
+    compose_file = body.get("compose_file")
+    service = body.get("service")
+    down = bool(body.get("down", False))
+    remove_volumes = bool(body.get("remove_volumes", False))
+    remove_orphans = bool(body.get("remove_orphans", True))
+    timeout = int(body.get("timeout", 600))
+
+    if not isinstance(cwd, str):
+        return JSONResponse({"error": "cwd_required"}, status_code=422)
+    if compose_file and not isinstance(compose_file, str):
+        return JSONResponse({"error": "compose_file_must_be_string"}, status_code=422)
+    if service and not isinstance(service, str):
+        return JSONResponse({"error": "service_must_be_string"}, status_code=422)
+
+    try:
+        compose_path = _resolve_compose_file(cwd, compose_file)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+
+    cmd = _compose_cmd(compose_path)
+    if down:
+        cmd.append("down")
+        if remove_volumes:
+            cmd.append("-v")
+        if remove_orphans:
+            cmd.append("--remove-orphans")
+    else:
+        cmd.append("stop")
+        if service:
+            cmd.append(service)
+
+    try:
+        result = await _run_process(cmd, cwd=cwd, timeout=timeout)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    return JSONResponse({"status": "ok", "command": cmd, **result})
+
+
+async def system_restart(request: Request) -> Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    cwd = body.get("cwd")
+    compose_file = body.get("compose_file")
+    service = body.get("service")
+    timeout = int(body.get("timeout", 600))
+
+    if not isinstance(cwd, str):
+        return JSONResponse({"error": "cwd_required"}, status_code=422)
+    if compose_file and not isinstance(compose_file, str):
+        return JSONResponse({"error": "compose_file_must_be_string"}, status_code=422)
+    if service and not isinstance(service, str):
+        return JSONResponse({"error": "service_must_be_string"}, status_code=422)
+
+    try:
+        compose_path = _resolve_compose_file(cwd, compose_file)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+
+    cmd = _compose_cmd(compose_path)
+    cmd.append("restart")
+    if service:
+        cmd.append(service)
+
+    try:
+        result = await _run_process(cmd, cwd=cwd, timeout=timeout)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    return JSONResponse({"status": "ok", "command": cmd, **result})
+
+
+async def system_status(request: Request) -> Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    cwd = body.get("cwd")
+    compose_file = body.get("compose_file")
+    service = body.get("service")
+    timeout = int(body.get("timeout", 300))
+
+    if not isinstance(cwd, str):
+        return JSONResponse({"error": "cwd_required"}, status_code=422)
+    if compose_file and not isinstance(compose_file, str):
+        return JSONResponse({"error": "compose_file_must_be_string"}, status_code=422)
+    if service and not isinstance(service, str):
+        return JSONResponse({"error": "service_must_be_string"}, status_code=422)
+
+    try:
+        compose_path = _resolve_compose_file(cwd, compose_file)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+
+    # Prefer structured output
+    cmd_json = _compose_cmd(compose_path) + ["ps", "--format", "json"]
+    result_json = await _run_process(cmd_json, cwd=cwd, timeout=timeout)
+    running_services: List[str] = []
+    services: List[Dict[str, Any]] = []
+    parsed_ok = False
+    if result_json["returncode"] == 0:
+        try:
+            data = json.loads(result_json["stdout"] or "[]")
+            if isinstance(data, list):
+                for entry in data:
+                    name = entry.get("Service") or entry.get("Name")
+                    state = entry.get("State") or entry.get("Status")
+                    services.append({"service": name, "state": state, "raw": entry})
+                    if state and str(state).lower().startswith("running"):
+                        running_services.append(name)
+                parsed_ok = True
+        except Exception:
+            parsed_ok = False
+
+    if not parsed_ok:
+        # Fallback to plain text output
+        cmd = _compose_cmd(compose_path) + ["ps"]
+        result = await _run_process(cmd, cwd=cwd, timeout=timeout)
+        return JSONResponse(
+            {
+                "status": "ok",
+                "command": cmd,
+                "stdout": result.get("stdout"),
+                "stderr": result.get("stderr"),
+                "returncode": result.get("returncode"),
+            }
+        )
+
+    status_payload: Dict[str, Any] = {
+        "status": "ok",
+        "command": cmd_json,
+        "services": services,
+        "running_services": running_services,
+    }
+    if service:
+        status_payload["service_running"] = service in running_services
+    return JSONResponse(status_payload)
+
+
+async def system_logs_snapshot(request: Request) -> Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    cwd = body.get("cwd")
+    compose_file = body.get("compose_file")
+    service = body.get("service")
+    tail = int(body.get("tail", 200))
+    timestamps = bool(body.get("timestamps", True))
+    no_color = bool(body.get("no_color", True))
+    timeout = int(body.get("timeout", 600))
+
+    if not isinstance(cwd, str):
+        return JSONResponse({"error": "cwd_required"}, status_code=422)
+    if compose_file and not isinstance(compose_file, str):
+        return JSONResponse({"error": "compose_file_must_be_string"}, status_code=422)
+    if service and not isinstance(service, str):
+        return JSONResponse({"error": "service_must_be_string"}, status_code=422)
+
+    try:
+        compose_path = _resolve_compose_file(cwd, compose_file)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+
+    cmd = _compose_cmd(compose_path) + ["logs", "--tail", str(tail)]
+    if timestamps:
+        cmd.append("--timestamps")
+    if no_color:
+        cmd.append("--no-color")
+    if service:
+        cmd.append(service)
+
+    try:
+        result = await _run_process(cmd, cwd=cwd, timeout=timeout)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    return JSONResponse({"status": "ok", "command": cmd, **result})
+
+
+async def _compose_logs_stream_generator(
+    cwd: str,
+    compose_path: Optional[Path],
+    service: Optional[str],
+    tail: int,
+    timestamps: bool,
+    no_color: bool,
+):
+    cmd = _compose_cmd(compose_path) + ["logs", "-f", "--tail", str(tail)]
+    if timestamps:
+        cmd.append("--timestamps")
+    if no_color:
+        cmd.append("--no-color")
+    if service:
+        cmd.append(service)
+
+    env = os.environ.copy()
+    env.setdefault("CI", "1")
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+
+    working_dir = _resolve_path(cwd, base=WORKSPACE_ROOT)
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=str(working_dir),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        env=env,
+    )
+
+    try:
+        assert proc.stdout is not None
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            yield line
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            if proc.returncode is None:
+                proc.kill()
+
+
+async def system_logs_stream(request: Request) -> Response:
+    params = request.query_params
+    cwd = params.get("cwd")
+    compose_file = params.get("compose_file")
+    service = params.get("service")
+    tail = int(params.get("tail", "200"))
+    timestamps = params.get("timestamps", "true").lower() != "false"
+    no_color = params.get("no_color", "true").lower() != "false"
+
+    if not isinstance(cwd, str):
+        return JSONResponse({"error": "cwd_required"}, status_code=422)
+    if compose_file and not isinstance(compose_file, str):
+        return JSONResponse({"error": "compose_file_must_be_string"}, status_code=422)
+    if service and not isinstance(service, str):
+        return JSONResponse({"error": "service_must_be_string"}, status_code=422)
+
+    try:
+        compose_path = _resolve_compose_file(cwd, compose_file)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+
+    generator = _compose_logs_stream_generator(
+        cwd=cwd,
+        compose_path=compose_path,
+        service=service,
+        tail=tail,
+        timestamps=timestamps,
+        no_color=no_color,
+    )
+    return StreamingResponse(generator, media_type="text/plain")
+
+
+async def http_health(request: Request) -> Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    url = body.get("url")
+    host = body.get("host", "127.0.0.1")
+    port = body.get("port")
+    path = body.get("path", "/")
+    timeout_s = float(body.get("timeout", 3))
+
+    if url and not isinstance(url, str):
+        return JSONResponse({"error": "url_must_be_string"}, status_code=422)
+    if not url:
+        if not isinstance(port, (int, str)):
+            return JSONResponse({"error": "port_required"}, status_code=422)
+        url = f"http://{host}:{int(port)}{path}"
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            resp = await client.get(url)
+        return JSONResponse(
+            {
+                "status": "ok",
+                "url": url,
+                "http_status": resp.status_code,
+                "ok": resp.status_code < 500,
+            }
+        )
+    except Exception as e:
+        return JSONResponse(
+            {"status": "error", "url": url, "error": str(e)}, status_code=200
+        )
+
+
 routes = [
     Route("/scaffold_project", scaffold_project, methods=["POST"]),
     Route("/install_dependencies", install_dependencies, methods=["POST"]),
     Route("/git_command", git_command, methods=["POST"]),
+    # System Operator
+    Route("/system_operator/start", system_start, methods=["POST"]),
+    Route("/system_operator/stop", system_stop, methods=["POST"]),
+    Route("/system_operator/restart", system_restart, methods=["POST"]),
+    Route("/system_operator/status", system_status, methods=["POST"]),
+    Route("/system_operator/logs", system_logs_snapshot, methods=["POST"]),
+    Route("/system_operator/logs/stream", system_logs_stream, methods=["GET"]),
+    Route("/system_operator/http_health", http_health, methods=["POST"]),
 ]
+
 
 def _make_registration_payload(agent_address: str) -> Dict[str, Any]:
     return {
@@ -290,11 +702,18 @@ def _make_registration_payload(agent_address: str) -> Dict[str, Any]:
         "agent_address": agent_address,
         "capabilities": {
             "role": "environment_manager",
-            "version": "0.1.0",
+            "version": "0.2.0",
             "endpoints": [
                 "/scaffold_project",
                 "/install_dependencies",
                 "/git_command",
+                "/system_operator/start",
+                "/system_operator/stop",
+                "/system_operator/restart",
+                "/system_operator/status",
+                "/system_operator/logs",
+                "/system_operator/logs/stream",
+                "/system_operator/http_health",
             ],
             "mcp_tools": [
                 {
@@ -331,7 +750,11 @@ def _make_registration_payload(agent_address: str) -> Dict[str, Any]:
                                 "type": ["array", "null"],
                                 "items": {"type": "string"},
                             },
-                            "timeout": {"type": "integer", "minimum": 1, "default": 1800},
+                            "timeout": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 1800,
+                            },
                         },
                         "required": ["cwd"],
                         "additionalProperties": False,
@@ -355,7 +778,11 @@ def _make_registration_payload(agent_address: str) -> Dict[str, Any]:
                                 "type": "array",
                                 "items": {"type": "string"},
                             },
-                            "timeout": {"type": "integer", "minimum": 1, "default": 600},
+                            "timeout": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 600,
+                            },
                         },
                         "required": ["cwd", "args"],
                         "additionalProperties": False,
@@ -368,9 +795,173 @@ def _make_registration_payload(agent_address: str) -> Dict[str, Any]:
                         }
                     },
                 },
+                {
+                    "name": "system_start",
+                    "description": "Start the application using docker compose in detached mode.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "cwd": {"type": "string"},
+                            "compose_file": {"type": ["string", "null"]},
+                            "service": {"type": ["string", "null"]},
+                            "build": {"type": "boolean", "default": False},
+                            "extra_args": {
+                                "type": ["array", "null"],
+                                "items": {"type": "string"},
+                            },
+                            "timeout": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 600,
+                            },
+                        },
+                        "required": ["cwd"],
+                        "additionalProperties": False,
+                    },
+                    "_meta": {
+                        "http": {
+                            "endpoint": "/system_operator/start",
+                            "method": "POST",
+                            "returnType": "json",
+                        }
+                    },
+                },
+                {
+                    "name": "system_stop",
+                    "description": "Stop or bring down the application using docker compose.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "cwd": {"type": "string"},
+                            "compose_file": {"type": ["string", "null"]},
+                            "service": {"type": ["string", "null"]},
+                            "down": {"type": "boolean", "default": False},
+                            "remove_volumes": {"type": "boolean", "default": False},
+                            "remove_orphans": {"type": "boolean", "default": True},
+                            "timeout": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 600,
+                            },
+                        },
+                        "required": ["cwd"],
+                        "additionalProperties": False,
+                    },
+                    "_meta": {
+                        "http": {
+                            "endpoint": "/system_operator/stop",
+                            "method": "POST",
+                            "returnType": "json",
+                        }
+                    },
+                },
+                {
+                    "name": "system_restart",
+                    "description": "Restart the application service using docker compose.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "cwd": {"type": "string"},
+                            "compose_file": {"type": ["string", "null"]},
+                            "service": {"type": ["string", "null"]},
+                            "timeout": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 600,
+                            },
+                        },
+                        "required": ["cwd"],
+                        "additionalProperties": False,
+                    },
+                    "_meta": {
+                        "http": {
+                            "endpoint": "/system_operator/restart",
+                            "method": "POST",
+                            "returnType": "json",
+                        }
+                    },
+                },
+                {
+                    "name": "system_status",
+                    "description": "Return docker compose status for running services.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "cwd": {"type": "string"},
+                            "compose_file": {"type": ["string", "null"]},
+                            "service": {"type": ["string", "null"]},
+                            "timeout": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 300,
+                            },
+                        },
+                        "required": ["cwd"],
+                        "additionalProperties": False,
+                    },
+                    "_meta": {
+                        "http": {
+                            "endpoint": "/system_operator/status",
+                            "method": "POST",
+                            "returnType": "json",
+                        }
+                    },
+                },
+                {
+                    "name": "system_logs",
+                    "description": "Fetch recent docker compose logs (stdout/stderr).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "cwd": {"type": "string"},
+                            "compose_file": {"type": ["string", "null"]},
+                            "service": {"type": ["string", "null"]},
+                            "tail": {"type": "integer", "minimum": 0, "default": 200},
+                            "timestamps": {"type": "boolean", "default": True},
+                            "no_color": {"type": "boolean", "default": True},
+                            "timeout": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 600,
+                            },
+                        },
+                        "required": ["cwd"],
+                        "additionalProperties": False,
+                    },
+                    "_meta": {
+                        "http": {
+                            "endpoint": "/system_operator/logs",
+                            "method": "POST",
+                            "returnType": "json",
+                        }
+                    },
+                },
+                {
+                    "name": "http_health",
+                    "description": "Perform an HTTP GET to check if the development server responds.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "url": {"type": ["string", "null"]},
+                            "host": {"type": "string", "default": "127.0.0.1"},
+                            "port": {"type": ["integer", "string", "null"]},
+                            "path": {"type": "string", "default": "/"},
+                            "timeout": {"type": ["integer", "number"], "default": 3},
+                        },
+                        "additionalProperties": False,
+                    },
+                    "_meta": {
+                        "http": {
+                            "endpoint": "/system_operator/http_health",
+                            "method": "POST",
+                            "returnType": "json",
+                        }
+                    },
+                },
             ],
         },
     }
+
 
 _agent = AgentApp(
     agent_name=AGENT_NAME,

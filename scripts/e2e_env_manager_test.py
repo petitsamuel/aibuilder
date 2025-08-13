@@ -58,7 +58,9 @@ def wait_for_http_ok(url: str, timeout_seconds: int = 30) -> None:
     raise RuntimeError(f"Timeout waiting for {url}. Last error: {last_err}")
 
 
-def terminate_process(proc: subprocess.Popen, name: str, timeout_seconds: float = 5.0) -> None:
+def terminate_process(
+    proc: subprocess.Popen, name: str, timeout_seconds: float = 5.0
+) -> None:
     if proc.poll() is not None:
         return
     try:
@@ -180,7 +182,9 @@ def main() -> int:
             git_url = f"http://{AGENT_HOST}:{AGENT_PORT}/git_command"
 
             def git(args: list[str]) -> dict:
-                c, b = _http_post_json(git_url, {"cwd": str(dest_dir), "args": args, "timeout": 60})
+                c, b = _http_post_json(
+                    git_url, {"cwd": str(dest_dir), "args": args, "timeout": 60}
+                )
                 if c != 200:
                     raise RuntimeError(f"git command failed: {c} {b}")
                 return json.loads(b)
@@ -193,7 +197,17 @@ def main() -> int:
             if res.get("returncode") != 0:
                 raise RuntimeError(f"git add failed: {res}")
 
-            res = git(["-c", "user.name=E2E", "-c", "user.email=e2e@example.com", "commit", "-m", "init"]) 
+            res = git(
+                [
+                    "-c",
+                    "user.name=E2E",
+                    "-c",
+                    "user.email=e2e@example.com",
+                    "commit",
+                    "-m",
+                    "init",
+                ]
+            )
             if res.get("returncode") != 0:
                 raise RuntimeError(f"git commit failed: {res}")
 
@@ -214,5 +228,3 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except KeyboardInterrupt:
         raise SystemExit(130)
-
-
