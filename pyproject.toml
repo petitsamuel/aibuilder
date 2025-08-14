@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "python-dotenv>=1.0.1",
     "fastmcp>=2.11.3",
     "httpx>=0.28.1",
     "pyyaml>=6.0.2",
@@ -20,4 +21,5 @@ packages = [
     "architect",
     "devopsagent",
     "orchestrator",
+    "coder",
 ]

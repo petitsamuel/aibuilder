@@ -9,9 +9,12 @@ from starlette.responses import JSONResponse, Response, PlainTextResponse
 from starlette.routing import Route
 
 from pathlib import Path
+
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from agentkit import AgentApp
+from dotenv import load_dotenv
 
+load_dotenv()
 
 # ------------------------------
 # Configuration (env-overridable)
@@ -29,10 +32,6 @@ DEFAULT_TEMPLATES: List[str] = [
 ]
 
 
-def _agent_address() -> str:
-    return f"http://{AGENT_HOST}:{AGENT_PORT}"
-
-
 # ------------------------------
 # Selection logic
 # ------------------------------
@@ -45,22 +44,40 @@ def score_template(prompt: str, template: str) -> int:
 
     score = 0
     # Direct matches
-    for token in ["react", "express", "sqlite", "vue", "fastapi", "postgres", "next", "nextjs", "supabase"]:
+    for token in [
+        "react",
+        "express",
+        "sqlite",
+        "vue",
+        "fastapi",
+        "postgres",
+        "next",
+        "nextjs",
+        "supabase",
+    ]:
         if token in p and token in t:
             score += 3
 
     # Synonyms / implications
-    if ("node" in p or "javascript" in p or "js" in p) and ("express" in t or "react" in t):
+    if ("node" in p or "javascript" in p or "js" in p) and (
+        "express" in t or "react" in t
+    ):
         score += 2
     if ("python" in p) and ("fastapi" in t):
         score += 2
-    if ("database" in p or "db" in p or "sql" in p) and ("postgres" in t or "sqlite" in t or "supabase" in t):
+    if ("database" in p or "db" in p or "sql" in p) and (
+        "postgres" in t or "sqlite" in t or "supabase" in t
+    ):
         score += 2
-    if ("modern frontend" in p or "modern ui" in p or "ssr" in p) and ("next" in t or "nextjs" in t):
+    if ("modern frontend" in p or "modern ui" in p or "ssr" in p) and (
+        "next" in t or "nextjs" in t
+    ):
         score += 2
     if ("simple" in p or "lightweight" in p) and ("sqlite" in t):
         score += 1
-    if ("real-time" in p or "realtime" in p or "auth" in p or "authentication" in p) and ("supabase" in t):
+    if (
+        "real-time" in p or "realtime" in p or "auth" in p or "authentication" in p
+    ) and ("supabase" in t):
         score += 2
 
     return score
@@ -69,7 +86,9 @@ def score_template(prompt: str, template: str) -> int:
 def select_template(prompt: str, templates: List[str]) -> str:
     if not templates:
         templates = DEFAULT_TEMPLATES
-    best = max(templates, key=lambda tpl: (score_template(prompt, tpl), -templates.index(tpl)))
+    best = max(
+        templates, key=lambda tpl: (score_template(prompt, tpl), -templates.index(tpl))
+    )
     # Ties are broken by template order due to the secondary key
     return best
 
@@ -90,8 +109,12 @@ async def execute_task(request: Request) -> Response:
 
     if not isinstance(prompt, str) or not prompt.strip():
         return JSONResponse({"error": "prompt_required"}, status_code=422)
-    if not isinstance(templates, list) or not all(isinstance(x, str) for x in templates):
-        return JSONResponse({"error": "templates_must_be_list_of_strings"}, status_code=422)
+    if not isinstance(templates, list) or not all(
+        isinstance(x, str) for x in templates
+    ):
+        return JSONResponse(
+            {"error": "templates_must_be_list_of_strings"}, status_code=422
+        )
 
     choice = select_template(prompt, templates)
     # Output must be only the string name of the chosen template
@@ -101,6 +124,7 @@ async def execute_task(request: Request) -> Response:
 routes = [
     Route("/execute_task", execute_task, methods=["POST"]),
 ]
+
 
 def _make_registration_payload(agent_address: str) -> Dict[str, Any]:
     return {
@@ -138,6 +162,7 @@ def _make_registration_payload(agent_address: str) -> Dict[str, Any]:
             ],
         },
     }
+
 
 _agent = AgentApp(
     agent_name=AGENT_NAME,
