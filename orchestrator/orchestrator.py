@@ -386,13 +386,13 @@ async def decide_next_action(
         prompt = build_decision_prompt(goal, plan, recent, files, tools)
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                print("prompt", prompt)
-                print(
-                    "openrouter_api_key",
-                    os.getenv("OPENROUTER_API_KEY"),
-                    "openrouter_model",
-                    os.getenv("OPENROUTER_MODEL"),
-                )
+                # print("prompt", prompt)
+                # print(
+                #     "openrouter_api_key",
+                #     os.getenv("OPENROUTER_API_KEY"),
+                #     "openrouter_model",
+                #     os.getenv("OPENROUTER_MODEL"),
+                # )
                 resp = await client.post(
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers={
@@ -806,7 +806,6 @@ class Orchestrator:
             return
 
     async def one_turn(self) -> None:
-        print("one_turn")
         self._ensure_initial_plan()
 
         plan = self.db.get_plan()
@@ -815,7 +814,6 @@ class Orchestrator:
 
         async with MCPRegistryClient(self.registry_url) as mcp:
             tools = await mcp.list_tools()
-            print("tools", tools)
             # Sync plan with current state before deciding
             self._sync_plan_with_state(tools)
             plan = self.db.get_plan()

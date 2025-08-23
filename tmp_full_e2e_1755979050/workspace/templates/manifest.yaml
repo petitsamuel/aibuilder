@@ -1,0 +1,29 @@
+# templates/manifest.yaml
+# This file is the single source of truth for all available application templates.
+# The Tech Stack Selector agent reads this to make its decision.
+# The Environment Manager agent reads this to know which directory to copy.
+
+# TODO : define list of init commands for each template
+
+templates:
+  - id: "t3-stack"
+    name: "T3 Stack (Next.js, TypeScript, tRPC, Prisma, NextAuth.js, Tailwind CSS)"
+    path: "./t3-app"
+    description: |
+      A modular, full-stack, typesafe web development stack. [3] It is an opinionated project that prioritizes solving specific problems and using bleeding-edge technology responsibly. [3] The core components are Next.js and TypeScript, with tRPC, Prisma, and NextAuth.js as optional additions for backend functionality. [3] This stack is ideal for developers who want a quick way to start a new, typesafe web application. [3]
+    tags:
+      - "nextjs"
+      - "react"
+      - "typescript"
+      - "trpc"
+      - "prisma"
+      - "drizzle"
+      - "nextauthjs"
+      - "tailwindcss"
+      - "full-stack"
+      - "typesafe"
+    system_instructions:
+      coder_agent_si: |
+        You are an expert in the T3 Stack. Your focus is on building a typesafe application. You will create tRPC routers and procedures in the `/server/api/routers` directory. [1, 5] You will use Prisma for database interactions. Your frontend components will be in the `/src/app/_components` directory. [5]
+      qa_agent_si: |
+        You are a QA agent testing a T3 Stack application. You will focus on testing the tRPC API endpoints and ensuring typesafety between the frontend and backend. You should also verify that authentication with NextAuth.js is working correctly.

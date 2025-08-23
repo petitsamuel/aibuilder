@@ -29,9 +29,18 @@ class AgentApp:
         self.port = int(port or int(os.getenv("AGENT_PORT", "0") or 0) or 0)
         if self.port <= 0:
             # allow per-agent default via env; fallback to 0 (let uvicorn choose)
-            self.port = int(os.getenv(f"{self.agent_name.upper().replace('-','_')}_PORT", os.getenv("AGENT_PORT", "8000")))
-        self.registry_url = (registry_url or os.getenv("REGISTRY_URL", "http://127.0.0.1:8000")).rstrip("/")
-        self.heartbeat_interval = int(heartbeat_interval or int(os.getenv("HEARTBEAT_INTERVAL", "60")))
+            self.port = int(
+                os.getenv(
+                    f"{self.agent_name.upper().replace('-','_')}_PORT",
+                    os.getenv("AGENT_PORT", "8000"),
+                )
+            )
+        self.registry_url = (
+            registry_url or os.getenv("REGISTRY_URL", "http://127.0.0.1:8000")
+        ).rstrip("/")
+        self.heartbeat_interval = int(
+            heartbeat_interval or int(os.getenv("HEARTBEAT_INTERVAL", "60"))
+        )
 
         self._extra_routes = extra_routes or []
         self._make_registration_payload = make_registration_payload
@@ -86,5 +95,3 @@ class AgentApp:
                 await self._heartbeat_task
             except asyncio.CancelledError:
                 pass
-
-
