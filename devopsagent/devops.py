@@ -40,10 +40,6 @@ MANIFEST_PATH = os.getenv(
 )
 
 
-def _agent_address() -> str:
-    return f"http://{AGENT_HOST}:{AGENT_PORT}"
-
-
 def _resolve_path(path_like: str, base: Optional[str] = None) -> Path:
     base_dir = Path(base or WORKSPACE_ROOT).resolve()
     p = Path(path_like)
@@ -65,26 +61,10 @@ def _load_manifest() -> dict:
     return data
 
 
-def _lookup_template_path(
-    template_id: Optional[str], template_path: Optional[str]
-) -> Path:
-    if template_path:
-        # If relative path, resolve against templates dir
-        try:
-            return _resolve_path(template_path, base=TEMPLATES_DIR)
-        except ValueError:
-            # If provided absolute path is already within workspace, allow it
-            p = Path(template_path).resolve()
-            workspace = Path(WORKSPACE_ROOT).resolve()
-            try:
-                p.relative_to(workspace)
-            except ValueError:
-                raise ValueError("template_path_outside_workspace")
-            return p
-
+def _lookup_template_path(template_id: Optional[str]) -> Path:
+    """Resolve a template directory strictly via manifest and internal templates path."""
     if not template_id:
         raise ValueError("template_required")
-
     manifest = _load_manifest()
     templates = manifest.get("templates") or []
     for entry in templates:
@@ -93,7 +73,6 @@ def _lookup_template_path(
             if not raw_path:
                 raise ValueError("template_path_missing_in_manifest")
             return _resolve_path(raw_path, base=TEMPLATES_DIR)
-
     raise ValueError("template_id_not_found")
 
 
@@ -104,14 +83,22 @@ async def scaffold_project(request: Request) -> Response:
         return JSONResponse({"error": "invalid_json"}, status_code=400)
 
     template_id = body.get("template_id")
-    template_path = body.get("template_path")
+    # Do not accept external directory inputs; rely solely on manifest + internal templates dir
+    if isinstance(body.get("template_path"), str) or isinstance(
+        body.get("template_dir"), str
+    ):
+        return JSONResponse({"error": "template_path_not_allowed"}, status_code=422)
+    if isinstance(body.get("template"), str) and not template_id:
+        # If template looks like an id (no path separators), treat as id; else reject
+        val = body.get("template")
+        if "/" in val or os.sep in val:
+            return JSONResponse({"error": "template_path_not_allowed"}, status_code=422)
+        template_id = val
     destination_path = body.get("destination_path")
     project_name = body.get("project_name")
     overwrite = bool(body.get("overwrite", False))
 
-    if not isinstance(template_id, (str, type(None))) or not isinstance(
-        template_path, (str, type(None))
-    ):
+    if not isinstance(template_id, (str, type(None))):
         return JSONResponse({"error": "invalid_template_fields"}, status_code=422)
 
     if destination_path and not isinstance(destination_path, str):
@@ -125,7 +112,7 @@ async def scaffold_project(request: Request) -> Response:
         return JSONResponse({"error": "destination_required"}, status_code=422)
 
     try:
-        src_dir = _lookup_template_path(template_id, template_path)
+        src_dir = _lookup_template_path(template_id)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=422)
 
@@ -146,11 +133,29 @@ async def scaffold_project(request: Request) -> Response:
             status_code=404,
         )
 
+    # If destination is not provided but project_name is, compute destination under workspace
+    if not destination_path and isinstance(project_name, str) and project_name.strip():
+        try:
+            dest_dir = _resolve_path(project_name, base=WORKSPACE_ROOT)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=422)
+
+    # If destination exists and not overwriting, auto-pick a unique directory when project_name provided
     if dest_dir.exists() and any(dest_dir.iterdir()) and not overwrite:
-        return JSONResponse(
-            {"error": "destination_exists", "destination": str(dest_dir)},
-            status_code=409,
-        )
+        if isinstance(project_name, str) and project_name.strip():
+            base_parent = dest_dir.parent
+            base_name = Path(project_name).name
+            suffix = 2
+            new_dest = base_parent / f"{base_name}-{suffix}"
+            while new_dest.exists():
+                suffix += 1
+                new_dest = base_parent / f"{base_name}-{suffix}"
+            dest_dir = new_dest
+        else:
+            return JSONResponse(
+                {"error": "destination_exists", "destination": str(dest_dir)},
+                status_code=409,
+            )
 
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -167,6 +172,7 @@ async def scaffold_project(request: Request) -> Response:
             "source": str(src_dir),
             "destination": str(dest_dir),
             "overwrite": overwrite,
+            "project_name": project_name,
         }
     )
 
@@ -299,6 +305,52 @@ async def git_command(request: Request) -> Response:
         return JSONResponse({"error": str(e)}, status_code=500)
 
     return JSONResponse({"status": "ok", "command": cmd, **result})
+
+
+async def git_commit(request: Request) -> Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    cwd = body.get("cwd")
+    message = body.get("message")
+    add_all = bool(body.get("add_all", True))
+    timeout = int(body.get("timeout", 600))
+
+    if not isinstance(cwd, str):
+        return JSONResponse({"error": "cwd_required"}, status_code=422)
+    if message is not None and not isinstance(message, str):
+        return JSONResponse({"error": "message_must_be_string"}, status_code=422)
+
+    commit_msg = (
+        message if (isinstance(message, str) and message.strip()) else "Auto-commit"
+    )
+
+    results: Dict[str, Any] = {"status": "ok"}
+
+    # Stage all changes if requested
+    if add_all:
+        try:
+            add_res = await _run_process(["git", "add", "-A"], cwd=cwd, timeout=timeout)
+            results["add"] = add_res
+            if add_res.get("returncode", 1) != 0:
+                results["status"] = "error"
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    # Commit
+    try:
+        commit_res = await _run_process(
+            ["git", "commit", "-m", commit_msg], cwd=cwd, timeout=timeout
+        )
+        results["commit"] = commit_res
+        if commit_res.get("returncode", 1) != 0 and results.get("status") == "ok":
+            results["status"] = "error"
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    return JSONResponse(results)
 
 
 # ------------------------------
@@ -685,6 +737,7 @@ routes = [
     Route("/scaffold_project", scaffold_project, methods=["POST"]),
     Route("/install_dependencies", install_dependencies, methods=["POST"]),
     Route("/git_command", git_command, methods=["POST"]),
+    Route("/git_commit", git_commit, methods=["POST"]),
     # System Operator
     Route("/system_operator/start", system_start, methods=["POST"]),
     Route("/system_operator/stop", system_stop, methods=["POST"]),
@@ -718,12 +771,11 @@ def _make_registration_payload(agent_address: str) -> Dict[str, Any]:
             "mcp_tools": [
                 {
                     "name": "scaffold_project",
-                    "description": "Copy a template directory into a destination to create a new project.",
+                    "description": "Scaffold a project from a template id in manifest.yaml into a destination within the workspace.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "template_id": {"type": ["string", "null"]},
-                            "template_path": {"type": ["string", "null"]},
                             "destination_path": {"type": ["string", "null"]},
                             "project_name": {"type": ["string", "null"]},
                             "overwrite": {"type": "boolean", "default": False},
@@ -762,6 +814,32 @@ def _make_registration_payload(agent_address: str) -> Dict[str, Any]:
                     "_meta": {
                         "http": {
                             "endpoint": "/install_dependencies",
+                            "method": "POST",
+                            "returnType": "json",
+                        }
+                    },
+                },
+                {
+                    "name": "git_commit",
+                    "description": "Stage and commit changes in the specified directory.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "cwd": {"type": "string"},
+                            "message": {"type": ["string", "null"]},
+                            "add_all": {"type": "boolean", "default": True},
+                            "timeout": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 600,
+                            },
+                        },
+                        "required": ["cwd"],
+                        "additionalProperties": False,
+                    },
+                    "_meta": {
+                        "http": {
+                            "endpoint": "/git_commit",
                             "method": "POST",
                             "returnType": "json",
                         }
